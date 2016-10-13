@@ -26,6 +26,8 @@ import threading
 import time
 import uuid
 
+from eventlet import event
+from eventlet import timeout
 import kombu
 import kombu.connection
 import kombu.entity
@@ -965,9 +967,44 @@ class Connection(object):
         # every heartbeat_timeout_threshold, so no need to way more
         self.connection.heartbeat_check(rate=self.heartbeat_rate)
 
+    if eventletutils.is_monkey_patched('thread'):
+        def _heartbeat_exit_setup(self):
+            self._heartbeat_exit_done = False
+            self._heartbeat_exit_event = event.Event()
+
+        def _heartbeat_exit_set(self):
+            self._heartbeat_exit_done = True
+            self._heartbeat_exit_event.send(True)
+
+        def _heartbeat_exit_is_set(self):
+            return self._heartbeat_exit_done
+
+        def _heartbeat_exit_cleanup(self):
+            pass
+
+        def _heartbeat_exit_wait(self):
+            with timeout.Timeout(self._heartbeat_wait_timeout, False):
+                self._heartbeat_exit_event.wait()
+    else:
+        def _heartbeat_exit_setup(self):
+            self._heartbeat_exit_event = threading.Event()
+
+        def _heartbeat_exit_set(self):
+            self._heartbeat_exit_event.set()
+
+        def _heartbeat_exit_is_set(self):
+            return self._heartbeat_exit_event.is_set()
+
+        def _heartbeat_exit_cleanup(self):
+            self._heartbeat_exit_event.clear()
+
+        def _heartbeat_exit_wait(self):
+            self._heartbeat_exit_event_wait(
+                timeout=self._heartbeat_wait_timeout)
+
     def _heartbeat_start(self):
         if self._heartbeat_supported_and_enabled():
-            self._heartbeat_exit_event = threading.Event()
+            self._heartbeat_exit_setup()
             self._heartbeat_thread = threading.Thread(
                 target=self._heartbeat_thread_job)
             self._heartbeat_thread.daemon = True
@@ -977,14 +1014,14 @@ class Connection(object):
 
     def _heartbeat_stop(self):
         if self._heartbeat_thread is not None:
-            self._heartbeat_exit_event.set()
+            self._heartbeat_exit_set()
             self._heartbeat_thread.join()
             self._heartbeat_thread = None
 
     def _heartbeat_thread_job(self):
         """Thread that maintains inactive connections
         """
-        while not self._heartbeat_exit_event.is_set():
+        while not self._heartbeat_exit_is_set():
             with self._connection_lock.for_heartbeat():
 
                 recoverable_errors = (
@@ -1013,9 +1050,8 @@ class Connection(object):
                                     "thread processing, retrying..."))
                     LOG.debug('Exception', exc_info=True)
 
-            self._heartbeat_exit_event.wait(
-                timeout=self._heartbeat_wait_timeout)
-        self._heartbeat_exit_event.clear()
+            self._heartbeat_exit_wait()
+        self._heartbeat_exit_cleanup()
 
     def declare_consumer(self, consumer):
         """Create a Consumer using the class that was passed in and
