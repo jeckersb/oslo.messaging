@@ -18,9 +18,11 @@ import sys
 import threading
 
 from oslo_log import log as logging
+from oslo_reports import guru_meditation_report as gmr
 from oslo_utils import timeutils
 import six
 
+from oslo_messaging import report
 from oslo_messaging._drivers import common
 
 LOG = logging.getLogger(__name__)
@@ -134,6 +136,8 @@ class ConnectionPool(Pool):
         super(ConnectionPool, self).__init__(max_size, min_size, ttl,
                                              self._on_expire)
 
+        gmr.TextGuruMeditation.register_section('Oslo Messaging Connection Pool',
+                                                report.ConnectionPoolReportGenerator(self))
     def _on_expire(self, connection):
         connection.close()
         LOG.debug("Idle connection has expired and been closed."
